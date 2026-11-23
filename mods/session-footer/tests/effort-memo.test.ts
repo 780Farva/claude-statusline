@@ -62,3 +62,15 @@ test("the footer's own settings read changes nothing, so drawing cannot loop", a
   expect(memo.level).toBe('high')
   expect(redraws).toEqual([])
 })
+
+test("a subagent's event does not change the remembered level", async () => {
+  const memo = createEffortMemo()
+  const { $, redraws } = fakeUi()
+  noteEffort(memo, $, { effort: { level: 'xhigh' } })
+  redraws.length = 0
+
+  noteEffort(memo, $, { effort: { level: 'medium' }, agent_id: 'docs-agent' })
+
+  expect(memo.level).toBe('xhigh')
+  expect(redraws).toEqual([])
+})

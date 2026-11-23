@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 import {
   CORAL, GREEN, LTCYAN, RED, YELLOW, ICON_AHEAD, ICON_BRANCH, ICON_CLEAN, ICON_FOLDER, ICON_MODIFIED, MIN_BRANCH_WIDTH,
   bar5, barColor, effortColor, gitParts, layoutFooter, modelEffort, normalizeModel, parseGit, parseOptions, pickEffort,
-  shortenMiddle,
+  fiveHourWindow, shortenMiddle,
   type EffortSources,
   type Part,
 } from '../hooks/footer-format'
@@ -224,4 +224,29 @@ test('pickEffort uses the sources that were read when another read failed', asyn
   // A failed read reaches pickEffort as undefined.
   expect(pickEffort({ ...noEffort, modelSettings: undefined, envLevel: 'xhigh' })).toBe('xhigh')
   expect(pickEffort({ ...noEffort, envLevel: undefined, modelSettings: opusHigh })).toBe('high')
+})
+
+const NOW = Date.parse('2026-11-23T12:00:00Z')
+const iso = (ms: number) => new Date(ms).toISOString()
+
+test('fiveHourWindow gives the 5-hour use and its reset time', async () => {
+  expect(fiveHourWindow([
+    { kind: 'seven_day', percentUsed: 50 },
+    { kind: 'five_hour', percentUsed: 13.7, resetsAt: iso(NOW + 60_000) },
+  ], NOW)).toEqual({ percent: 13, resetsAtMs: NOW + 60_000 })
+})
+
+test('fiveHourWindow gives null with no 5-hour reading', async () => {
+  expect(fiveHourWindow([], NOW)).toBeNull()
+  expect(fiveHourWindow([{ kind: 'seven_day', percentUsed: 50 }], NOW)).toBeNull()
+})
+
+test('fiveHourWindow drops a reading once its reset time has passed', async () => {
+  expect(fiveHourWindow([{ kind: 'five_hour', percentUsed: 97, resetsAt: iso(NOW) }], NOW)).toBeNull()
+  expect(fiveHourWindow([{ kind: 'five_hour', percentUsed: 97, resetsAt: iso(NOW - 1) }], NOW)).toBeNull()
+})
+
+test('fiveHourWindow keeps a reading with no readable reset time', async () => {
+  expect(fiveHourWindow([{ kind: 'five_hour', percentUsed: 5 }], NOW)).toEqual({ percent: 5, resetsAtMs: null })
+  expect(fiveHourWindow([{ kind: 'five_hour', percentUsed: 5, resetsAt: 'soon' }], NOW)).toEqual({ percent: 5, resetsAtMs: null })
 })

@@ -9,8 +9,11 @@ import type { EngineInterface } from 'claude-code'
 /** The latest effort level a hook event carried; '' when none, or forgotten. */
 export type EffortMemo = { level: string }
 
-/** What a classic hook event says about effort. */
-export type EffortEvent = { effort?: { level?: unknown } }
+/**
+ * What a classic hook event says about effort. `agent_id` is set when the event
+ * fired inside a subagent, whose effort is its own, not the session's.
+ */
+export type EffortEvent = { effort?: { level?: unknown }; agent_id?: string }
 
 /** The part of `$` the memo uses. */
 export type EffortEngine = Pick<EngineInterface, 'ui'>
@@ -20,10 +23,12 @@ export function createEffortMemo(): EffortMemo {
 }
 
 /**
- * Remembers the level a hook event (PostToolUse, Stop) carried: the effort the
- * turn actually ran at. Redraws when it changed.
+ * Remembers the level a main-conversation hook event (PostToolUse, Stop)
+ * carried: the effort the turn actually ran at. Redraws when it changed. An
+ * event from a subagent is ignored.
  */
 export function noteEffort(memo: EffortMemo, $: EffortEngine, e: EffortEvent): void {
+  if (e.agent_id) return
   const level = e.effort?.level
   if (typeof level === 'string' && level !== memo.level) {
     memo.level = level

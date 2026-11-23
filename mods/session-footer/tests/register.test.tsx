@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
 // The footer as Claude Code asks for it: the PromptHint row under the prompt.
 const FOOTER = {
@@ -11,21 +11,41 @@ const FOOTER = {
 const porcelain = (branch: string) =>
   `# branch.oid 00aa75f0c2068fb2b22773d905f8df8458fb85a5\n# branch.head ${branch}\n`
 
-type Engine = { branch: string; fail: boolean; gitRuns: number; statusLines: string[]; stash: string }
+// The time the fake engine's clock starts at.
+const START = Date.parse('2026-11-23T12:00:00Z')
+
+type RateLimit = { kind: string; percentUsed: number; resetsAt?: string }
+type Engine = {
+  branch: string; fail: boolean; gitRuns: number; statusLines: string[]; stash: string
+  ctx: number; rateLimits: RateLimit[]; clock: ReturnType<typeof mock.clock>
+}
 
 // Each hook here stands for the engine: it answers the mod's `$` calls.
 // `engine.branch` is what `git status` reports, `engine.statusLines` any more
 // porcelain lines and `engine.stash` what `git stash list` prints;
 // `engine.fail` makes the run throw, as an aborted `$.process.run` does.
+// `engine.ctx` and `engine.rateLimits` are what `$.session.usage()` reports; a
+// window past its resetsAt is dropped, as Claude Code drops it. `engine.clock`
+// is the kit's mock clock, starting at START.
 // `world.settingsFail` makes every settings read throw; `world.env` answers env.get.
-type World = { settings?: Record<string, unknown>; settingsFail?: boolean; env?: Record<string, string> }
+// `world.keepExpired` keeps reporting a window past its reset, as an engine slow
+// to drop it would.
+type World = { settings?: Record<string, unknown>; settingsFail?: boolean; env?: Record<string, string>; keepExpired?: boolean }
 function fakeEngine(on: any, world: World = {}): Engine {
-  const { settings = {}, settingsFail = false, env = {} } = world
-  const engine: Engine = { branch: 'main', fail: false, gitRuns: 0, statusLines: [], stash: '' }
+  const { settings = {}, settingsFail = false, env = {}, keepExpired = false } = world
+  const clock = mock.clock(on, { now: START })
+  const engine: Engine = {
+    branch: 'main', fail: false, gitRuns: 0, statusLines: [], stash: '',
+    ctx: 9, rateLimits: [{ kind: 'five_hour', percentUsed: 13 }], clock,
+  }
   on('session.model', () => ({ value: 'claude-opus-5-5' }))
   on('session.cwd', () => ({ value: '/work/claude-statusline' }))
   on('session.usage', () => ({
-    value: { startedAt: 0, context: { percent: 9 }, rateLimits: [{ kind: 'five_hour', percentUsed: 13 }] },
+    value: {
+      startedAt: 0,
+      context: { percent: engine.ctx },
+      rateLimits: engine.rateLimits.filter((r) => keepExpired || !r.resetsAt || Date.parse(r.resetsAt) > clock.now()),
+    },
   }))
   on('settings.read', () => {
     if (settingsFail) throw new Error('settings unreadable')
@@ -156,5 +176,91 @@ test('an aborted git run keeps the last branch instead of blanking it', async ($
 
   expect(engine.gitRuns).toBeGreaterThan(before)
   expect(await branchText(ui)).toContain('main')
+  await ui.unmount()
+})
+
+// --- when the footer redraws: the same triggers as Claude Code's status line ---
+
+const ctxText = async (ui: any) => (await ui.find({ type: 'Text', text: /^ctx / }))?.text
+const fiveText = async (ui: any) => (await ui.find({ type: 'Text', text: /^5h / }))?.text
+
+test('a tool call redraws the context and 5h figures', async ($, on) => {
+  const engine = fakeEngine(on)
+  const ui = await $.ui.mount(FOOTER)
+  await endTurn($)
+  expect(await ctxText(ui)).toBe('ctx ◻◻◻◻◻ 9%')
+
+  engine.ctx = 55
+  engine.rateLimits = [{ kind: 'five_hour', percentUsed: 40 }]
+  await afterToolCall($)
+
+  expect(await ctxText(ui)).toBe('ctx ◼◼◻◻◻ 55%')
+  expect(await fiveText(ui)).toBe('5h ◼◼◻◻◻ 40%')
+  await ui.unmount()
+})
+
+test('a turn end redraws the context figure', async ($, on) => {
+  const engine = fakeEngine(on)
+  const ui = await $.ui.mount(FOOTER)
+  await endTurn($)
+  // A read settles any redraw already queued, so only the next event can redraw.
+  expect(await ctxText(ui)).toBe('ctx ◻◻◻◻◻ 9%')
+
+  engine.ctx = 81
+  await endTurn($)
+
+  expect(await ctxText(ui)).toBe('ctx ◼◼◼◼◻ 81%')
+  await ui.unmount()
+})
+
+test('a slash command redraws the footer once it ends', async ($, on) => {
+  const engine = fakeEngine(on)
+  on('command.run', () => ({ text: 'Compacted' }))
+  const ui = await $.ui.mount(FOOTER)
+  await endTurn($)
+  // A read settles any redraw already queued, so only the command can redraw.
+  expect(await ctxText(ui)).toBe('ctx ◻◻◻◻◻ 9%')
+
+  engine.ctx = 3
+  await ($ as any).command.run({ command: 'compact', args: '', origin: { kind: 'composer' }, presentation: { columns: 80 } })
+
+  expect(await ctxText(ui)).toBe('ctx ◻◻◻◻◻ 3%')
+  await ui.unmount()
+})
+
+test("a subagent's tool call does not change the effort shown", async ($, on) => {
+  fakeEngine(on, { settings: { effortLevel: 'xhigh' } })
+  const ui = await $.ui.mount(FOOTER)
+  expect(await effortText(ui)).toBe('\u{f0e7} xhigh')
+
+  await $.classic.PostToolUse({
+    tool_name: 'Grep', tool_input: {}, tool_response: {}, agent_id: 'docs-agent', effort: { level: 'medium' },
+  } as any)
+
+  expect(await effortText(ui)).toBe('\u{f0e7} xhigh')
+  await ui.unmount()
+})
+
+test('the 5h figure goes at its reset time with no other event', async ($, on) => {
+  const engine = fakeEngine(on)
+  engine.rateLimits = [{ kind: 'five_hour', percentUsed: 13, resetsAt: new Date(START + 60_000).toISOString() }]
+  const ui = await $.ui.mount(FOOTER)
+  expect(await fiveText(ui)).toBe('5h ◻◻◻◻◻ 13%')
+
+  await engine.clock.advance(59_000)
+  expect(await fiveText(ui)).toBe('5h ◻◻◻◻◻ 13%')
+
+  await engine.clock.advance(3_000)
+  expect(await fiveText(ui)).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a 5h reading past its reset is not drawn, even if still reported', async ($, on) => {
+  const engine = fakeEngine(on, { keepExpired: true })
+  engine.rateLimits = [{ kind: 'five_hour', percentUsed: 97, resetsAt: new Date(START - 1_000).toISOString() }]
+  const ui = await $.ui.mount(FOOTER)
+
+  expect(await fiveText(ui)).toBeUndefined()
+  expect(await ctxText(ui)).toBe('ctx ◻◻◻◻◻ 9%')
   await ui.unmount()
 })

@@ -129,6 +129,28 @@ export function parseOptions(options: Readonly<Record<string, unknown>> | undefi
   }
 }
 
+// --- rate limits ---
+
+/** One rate-limit window as `$.session.usage()` reports it. */
+export type RateLimitReading = { kind: string; percentUsed: number; resetsAt?: string }
+
+/** The 5-hour window to draw: its use, and when it resets (null when unknown). */
+export type FiveHourWindow = { percent: number; resetsAtMs: number | null }
+
+/**
+ * The 5-hour window from the latest readings, or null when there is none to
+ * draw. Claude Code drops a window once its `resets_at` passes; a reading whose
+ * reset time has passed is dropped here too, so an expired figure is never drawn.
+ */
+export function fiveHourWindow(readings: readonly RateLimitReading[], nowMs: number): FiveHourWindow | null {
+  const reading = readings.find((r) => r.kind === 'five_hour')
+  if (!reading) return null
+  const parsed = reading.resetsAt ? Date.parse(reading.resetsAt) : NaN
+  const resetsAtMs = Number.isNaN(parsed) ? null : parsed
+  if (resetsAtMs !== null && resetsAtMs <= nowMs) return null
+  return { percent: Math.floor(reading.percentUsed), resetsAtMs }
+}
+
 // --- row layout ---
 
 /** Width of the " | " and " · " separators. */
